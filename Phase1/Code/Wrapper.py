@@ -3,6 +3,7 @@ from pathlib import Path
 import numpy as np
 from scipy import io
 from functions.plots_p0 import plot_samples, plot_acc, plot_gyro, plot_angles, plot_all_methods, plot_quaternions
+from functions.plots_p0 import plot_all_methods_new
 from functions.video import make_orientation_video
 from scipy.spatial.transform import Rotation as R
 from scipy.spatial.transform import Rotation as R, Slerp
@@ -330,9 +331,9 @@ def scale_measurements_normalized(imu, parameters):
     # Filter Data For Loop
     for k in range(0, imu_filtered_empty.shape[1]):
         # Acc
-        imu_filtered_empty[0, k] = ((imu[0, k]*scales[0]) + biases[0])
-        imu_filtered_empty[1, k] = ((imu[1, k]*scales[1]) + biases[1])
-        imu_filtered_empty[2, k] = ((imu[2, k]*scales[2]) + biases[2])
+        imu_filtered_empty[0, k] = ((imu[0, k]*scales[0]) + biases[0])*9.8
+        imu_filtered_empty[1, k] = ((imu[1, k]*scales[1]) + biases[1])*9.8
+        imu_filtered_empty[2, k] = ((imu[2, k]*scales[2]) + biases[2])*9.8
 
         # Gyro
         gyro_filtered_empy[:, k] = (3300.0/1023.0)*(np.pi/180.0)*(0.3)*(imu[3:6, k] - gyro_mean)
@@ -356,7 +357,6 @@ def madwick_filter(gyro, q0, t, dynamics, acc, flow, K_quat=10.0, renorm=True):
         acc_normalized = acc[:, k]/np.linalg.norm(acc[:, k])
 
         # Integration quaternion Runge Kutta 4
-        aux = dynamics(q, omega, K_quat, dt)
         q_dot_w = flow(q, omega, K_quat)
         q_dot_w = np.array(q_dot_w).reshape((4, 1))
         #u_t = alpha * np.linalg.norm(q_dot)*dt
@@ -366,12 +366,13 @@ def madwick_filter(gyro, q0, t, dynamics, acc, flow, K_quat=10.0, renorm=True):
         J = jacobian_madgwick(q)
         gradient = J.T@f
         q_dot_a = gradient/(np.linalg.norm(gradient))
-        q_dot = q_dot_w - 0.1*q_dot_a
-        
+        q_dot = q_dot_w - 3*q_dot_a
+        q_dot = np.array(q_dot).reshape((4,))
+    
         # Integration method
         q = q + q_dot*dt
-        q = q / np.linalg.norm(q)
-        q = np.array(aux).reshape((4, ))
+        q = q/np.linalg.norm(q)
+        q = np.array(q).reshape((4, ))
         Q[:, k+1] = q
 
     return Q
@@ -428,16 +429,24 @@ def main():
     # Parser
     parser = argparse.ArgumentParser()
     parser.add_argument("--imu_dir", default="../Data/Train/IMU/", help="Directory containing IMU files")
-    parser.add_argument("--imu_file", default="imuRaw4", help="IMU file name (without extension)")
     parser.add_argument("--vicon_dir", default="../Data/Train/Vicon/", help="Directory containing Vicon files")
-    parser.add_argument("--vicon_file", default="viconRot4", help="Vicon file name (without extension)")
     parser.add_argument("--imu_params", default="../IMUParams.mat", help="Path to IMU parameters file")
-    args = parser.parse_args()
 
+    # New argument for experiment number
+    parser.add_argument("--exp_num", type=int, choices=range(1, 7), default=5,
+                    help="Experiment number (1–6).")
+
+
+    args = parser.parse_args()
+    imu_file = f"imuRaw{args.exp_num}"
+    vicon_file = f"viconRot{args.exp_num}"
+    
     # Full paths
-    imu_path = Path(args.imu_dir) / f"{args.imu_file}.mat"
-    vicon_path = Path(args.vicon_dir) / f"{args.vicon_file}.mat"
+    imu_path = Path(args.imu_dir) / f"{imu_file}.mat"
+    vicon_path = Path(args.vicon_dir) / f"{vicon_file}.mat"
     params_path = Path(args.imu_params)
+
+    print(imu_path)
 
     # Load data
     imu = io.loadmat(imu_path)
@@ -490,12 +499,8 @@ def main():
     rpy_gyro_quat = quat_to_euler_xyz(q_gyro_sync)
 
     q_complementary = simple_kalman_filter(gyro_sync, q0, t_sync, dynamics, df_dx, df_du,
-                         rpy_acc_sync, 0.00001, 100000,  K_quat=10.0)
+                         rpy_acc_sync, 0.000001, 1000000,  K_quat=10.0)
     rpy_complementary = quat_to_euler_xyz(q_complementary)
-
-    ## Comparative results
-    plot_all_methods(t_sync, rpy_acc_sync, t_sync, rpy_vicon_sync, t_sync,
-                     rpy_gyro_quat, t_sync, rpy_complementary, "Results_4")
 
     
     ## ---------------------------- P1 -----------------------------------
@@ -513,11 +518,14 @@ def main():
 
     q0 = quaternion_vicon_sync[:, 0]
     q_madgwick = madwick_filter(gyro_sync, q0, t_sync, dynamics, acc_sync, flow, K_quat=10.0, renorm=True)
+
+    plot_quaternions(t_sync, quaternion_vicon_sync, "vicon")
+    plot_quaternions(t_sync, q_madgwick, "madgwick")
     rpy_madgwick = quat_to_euler_xyz(q_madgwick)
 
-    plot_all_methods(t_sync, rpy_acc_sync, t_sync, rpy_vicon_sync, t_sync,
-                     rpy_madgwick, t_sync, rpy_complementary,
-                     "Results_4_madgwick")
+    plot_all_methods_new(t_sync, rpy_acc_sync, t_sync, rpy_vicon_sync, t_sync,
+                     rpy_gyro_quat, t_sync, rpy_complementary, t_sync,
+                         rpy_madgwick, f"Results{args.exp_num}")
     
     # Video
     #make_orientation_video(t_sync, rpy_vicon_sync, rpy_acc_sync, rpy_gyro_quat,

@@ -143,3 +143,73 @@ def plot_all_methods(time_acc, rpy_acc,
         fig.savefig(filename, dpi=300, bbox_inches="tight")
         plt.close(fig)
 
+def plot_all_methods_new(time_acc, rpy_acc,
+                     time_rot, rpy_rot,
+                     time_gyro, rpy_gyro,
+                     time_complement, rpy_complement,
+                     time_madgwick, rpy_madgwick,
+                     name="rpy_axis"):
+    import matplotlib.pyplot as plt
+
+    with plt.style.context(["science", "no-latex"]):
+        labels = ["roll", "pitch", "yaw"]
+
+        method_colors = {
+            "vicon":         "black",
+            "acc":           "blue",
+            "gyro":          "red",
+            "complementary": "green",
+            "madgwick":      "orange",
+        }
+        linestyles = {
+            "vicon":         "solid",
+            "acc":           "dashed",
+            "gyro":          "dotted",
+            "complementary": "dashdot",
+            "madgwick":      (0, (3, 1, 1, 1)),  # dash-dot-dot
+        }
+
+        methods = [
+            (time_acc,        rpy_acc,        "acc"),
+            (time_rot,        rpy_rot,        "vicon"),
+            (time_gyro,       rpy_gyro,       "gyro"),
+            (time_complement, rpy_complement, "complementary"),
+            (time_madgwick,   rpy_madgwick,   "madgwick"),
+        ]
+
+        fig, axes = plt.subplots(1, 3, figsize=(12, 3), sharex=False, sharey=False)
+
+        handles_for_legend = None
+        labels_for_legend  = None
+
+        for i, label in enumerate(labels):
+            ax = axes[i]
+            for time_s, data, method in methods:
+                ax.plot(
+                    time_s, data[i, :],
+                    label=method,
+                    color=method_colors[method],
+                    linestyle=linestyles[method],
+                    linewidth=1.6 if method in ("vicon", "complementary", "madgwick") else 1.2,
+                    zorder=3 if method in ("vicon", "complementary", "madgwick") else 2,
+                )
+            ax.set_title(label.capitalize())
+            ax.set_xlabel("Time [s]")
+            if i == 0:
+                ax.set_ylabel("Angle [rad]")
+            ax.autoscale(tight=True)
+
+            if i == len(labels) - 1:
+                handles_for_legend, labels_for_legend = ax.get_legend_handles_labels()
+
+        # Single shared legend above subplots
+        if handles_for_legend:
+            fig.legend(handles_for_legend, labels_for_legend,
+                       loc="upper center", ncol=5, frameon=False)
+
+        fig.tight_layout(rect=(0, 0, 1, 0.90))  # leave room for legend on top
+
+        filename = f"{name}_rpy.pdf"
+        fig.savefig(filename, dpi=300, bbox_inches="tight")
+        plt.close(fig)
+        return filename
