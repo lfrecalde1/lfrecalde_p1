@@ -366,7 +366,7 @@ def madwick_filter(gyro, q0, t, dynamics, acc, flow, K_quat=10.0, renorm=True):
         J = jacobian_madgwick(q)
         gradient = J.T@f
         q_dot_a = gradient/(np.linalg.norm(gradient))
-        q_dot = q_dot_w - 3*q_dot_a
+        q_dot = q_dot_w - 2*q_dot_a
         q_dot = np.array(q_dot).reshape((4,))
     
         # Integration method
