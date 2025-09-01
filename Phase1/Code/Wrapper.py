@@ -251,7 +251,6 @@ def quatdot_function():
 
     # Compute forward Euler method
     xk = q_sym + (1/6)*ts*(k1 + 2*k2 + 2*k3 + k4)
-    #xk = x + ts*k1
     casadi_kutta = ca.Function('casadi_kutta',[q_sym, omega_sym, K_sym, ts], [xk])
 
     ## Calculate jacobian and gradient
@@ -261,7 +260,7 @@ def quatdot_function():
     df_dx = ca.Function('df_dx', [q_sym, omega_sym, K_sym, ts], [dfdx_f])
     df_du = ca.Function('df_du', [q_sym, omega_sym, K_sym, ts], [dfdu_f])
     
-    return casadi_kutta, df_dx, df_du
+    return casadi_kutta, df_dx, df_du, dynamics_f
 
 def integrate_gyro_quaternion(gyro, q0, t, dynamics, K_quat=10.0, renorm=True):
     gyro = np.asarray(gyro, float)
@@ -317,6 +316,113 @@ def simple_kalman_filter(gyro, q0, t, dynamics, A_d, B_d, rpy_acc, gain_q,
         P = Pp - K@H@Pp
     return x
 
+def scale_measurements_normalized(imu, parameters):
+    scales = parameters[0, :]
+    biases = parameters[1, :]
+
+    # Acc
+    imu_filtered_empty = np.zeros_like(imu[0:3, :], dtype=float)
+
+    # Gyro
+    gyro_filtered_empy = np.zeros_like(imu[3:6, :], dtype=float)
+    gyro_mean = np.mean(imu[3:6, 0:200], axis=1)
+    
+    # Filter Data For Loop
+    for k in range(0, imu_filtered_empty.shape[1]):
+        # Acc
+        imu_filtered_empty[0, k] = ((imu[0, k]*scales[0]) + biases[0])
+        imu_filtered_empty[1, k] = ((imu[1, k]*scales[1]) + biases[1])
+        imu_filtered_empty[2, k] = ((imu[2, k]*scales[2]) + biases[2])
+
+        # Gyro
+        gyro_filtered_empy[:, k] = (3300.0/1023.0)*(np.pi/180.0)*(0.3)*(imu[3:6, k] - gyro_mean)
+
+    return imu_filtered_empty, gyro_filtered_empy
+
+def madwick_filter(gyro, q0, t, dynamics, acc, flow, K_quat=10.0, renorm=True):
+    gyro = np.asarray(gyro, float)
+    t = np.asarray(t, float).reshape(-1)
+    N = gyro.shape[1]
+    Q = np.zeros((4, N), dtype=float)
+    q = np.asarray(q0, float).reshape(4)
+    Q[:, 0] = q
+
+    for k in range(N-1):
+        # Get sample time
+        dt = float(t[k+1] - t[k])
+
+        # Rotate angular velocity
+        omega = np.array([gyro[0, k], -gyro[1, k], -gyro[2, k]])
+        acc_normalized = acc[:, k]/np.linalg.norm(acc[:, k])
+
+        # Integration quaternion Runge Kutta 4
+        aux = dynamics(q, omega, K_quat, dt)
+        q_dot_w = flow(q, omega, K_quat)
+        q_dot_w = np.array(q_dot_w).reshape((4, 1))
+        #u_t = alpha * np.linalg.norm(q_dot)*dt
+
+        # Cost Madgwick
+        f = cost_madgwick(q, acc_normalized)
+        J = jacobian_madgwick(q)
+        gradient = J.T@f
+        q_dot_a = gradient/(np.linalg.norm(gradient))
+        q_dot = q_dot_w - 0.1*q_dot_a
+        
+        # Integration method
+        q = q + q_dot*dt
+        q = q / np.linalg.norm(q)
+        q = np.array(aux).reshape((4, ))
+        Q[:, k+1] = q
+
+    return Q
+
+def cost_madgwick(q, a):
+    # Split Quaternions
+    q_w = q[0]
+    q_x = q[1]
+    q_y = q[2]
+    q_z = q[3]
+
+    # split acceleration
+    a_x = a[0]
+    a_y = a[1]
+    a_z = a[2]
+
+    f11 = 2*q_x*q_z - 2*q_w*q_y - a_x
+    f21 = 2*q_w*q_x - a_y + 2*q_y*q_z
+    f31 = q_w**2 - q_x**2 - q_y**2 + q_z**2 - a_z
+
+    f = np.array([[f11], [f21], [f31]])
+
+    return f
+
+def jacobian_madgwick(q):
+    # Split Quaternions
+    q_w = q[0]
+    q_x = q[1]
+    q_y = q[2]
+    q_z = q[3]
+
+    j11 = -2*q_y
+    j12 = 2*q_z
+    j13 = -2*q_w
+    j14 = 2*q_x
+
+    j21 =  2*q_x
+    j22 = 2*q_w
+    j23 = 2*q_z
+    j24 = 2*q_y
+
+    j31 = 2*q_w
+    j32 = -2*q_x
+    j33 = -2*q_y
+    j34 = 2*q_z
+
+    J = np.array([[j11, j12, j13, j14], [j21, j22, j23, j24], [j31, j32, j33,
+                                                               j34]])
+    return J
+
+
 def main():
 
     # Parser
@@ -362,8 +468,8 @@ def main():
     gyro_sync = interp_linear_timeseries(imu_ts[0, :],  gyro_data_filtered, t_sync)   
 
     # Plot the signals accelerometers and gyroscope
-    plot_acc(t_sync, acc_sync)
-    plot_gyro(t_sync, gyro_sync)
+    #plot_acc(t_sync, acc_sync)
+    #plot_gyro(t_sync, gyro_sync)
 
     # Interpolation of the rotation matrices 
     R_sync = slerp_rotmats(vicon_ts[0, :], vicon_data, t_sync)
@@ -376,7 +482,7 @@ def main():
     rpy_acc_sync = angles_from_acc(acc_sync)
 
     # Dystem dynamics and A matrix
-    dynamics, df_dx, df_du = quatdot_function()
+    dynamics, df_dx, df_du, flow = quatdot_function()
 
     # Integral gyro using quaternion dot
     q0 = quaternion_vicon_sync[:, 0]
@@ -390,6 +496,28 @@ def main():
     ## Comparative results
     plot_all_methods(t_sync, rpy_acc_sync, t_sync, rpy_vicon_sync, t_sync,
                      rpy_gyro_quat, t_sync, rpy_complementary, "Results_4")
+
+    
+    ## ---------------------------- P1 -----------------------------------
+    acc_data_normalized, gyro_data_filtered = scale_measurements_normalized(imu_data, imu_params)
+
+    t_sync = _choose_target_time(imu_ts[0, :].ravel(), vicon_ts[0, :].ravel(), prefer="denser")
+
+    # IMU (acc & gyro) are linear-interpolated per axis
+    acc_sync  = interp_linear_timeseries(imu_ts[0, :],  acc_data_normalized,  t_sync)   
+    gyro_sync = interp_linear_timeseries(imu_ts[0, :],  gyro_data_filtered, t_sync)   
+
+    # Plot the signals accelerometers and gyroscope
+    plot_acc(t_sync, acc_sync)
+    plot_gyro(t_sync, gyro_sync)
+
+    q0 = quaternion_vicon_sync[:, 0]
+    q_madgwick = madwick_filter(gyro_sync, q0, t_sync, dynamics, acc_sync, flow, K_quat=10.0, renorm=True)
+    rpy_madgwick = quat_to_euler_xyz(q_madgwick)
+
+    plot_all_methods(t_sync, rpy_acc_sync, t_sync, rpy_vicon_sync, t_sync,
+                     rpy_madgwick, t_sync, rpy_complementary,
+                     "Results_4_madgwick")
     
     # Video
     #make_orientation_video(t_sync, rpy_vicon_sync, rpy_acc_sync, rpy_gyro_quat,
