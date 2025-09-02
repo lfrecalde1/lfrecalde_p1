@@ -423,109 +423,175 @@ def jacobian_madgwick(q):
                                                                j34]])
     return J
 
+def loadmat_optional(path: Path):
+    """Load a .mat only if it exists; else return None."""
+    if path is None:
+        return None
+    if path.exists():
+        return io.loadmat(path)
+    return None
+
+def filters_estimation(imu_data, imu_params, imu_ts, vicon_data, vicon_ts,
+                       flag):
+    if flag:
+        # Scaled IMU Data
+        acc_data_filtered, gyro_data_filtered = scale_measurements(imu_data, imu_params)
+
+        # Check the common time grid 
+        t_sync = _choose_target_time(imu_ts[0, :].ravel(), vicon_ts[0, :].ravel(), prefer="denser")
+
+        # IMU (acc & gyro) are linear-interpolated per axis
+        acc_sync  = interp_linear_timeseries(imu_ts[0, :],  acc_data_filtered,  t_sync)   
+        gyro_sync = interp_linear_timeseries(imu_ts[0, :],  gyro_data_filtered, t_sync)   
+
+        # Interpolation of the rotation matrices 
+        R_sync = slerp_rotmats(vicon_ts[0, :], vicon_data, t_sync)
+
+        # Compute euler angles from vicon
+        quaternion_vicon_sync = quat_from_matrix(R_sync)
+        rpy_vicon_sync = quat_to_euler_xyz(quaternion_vicon_sync)
+
+        # Angles from acc
+        rpy_acc_sync = angles_from_acc(acc_sync)
+
+        # Dystem dynamics and A matrix
+        dynamics, df_dx, df_du, flow = quatdot_function()
+
+        # Integral gyro using quaternion dot
+        q0 = quaternion_vicon_sync[:, 0]
+        q_gyro_sync = integrate_gyro_quaternion(gyro_sync, q0, t_sync, dynamics)
+        rpy_gyro_quat = quat_to_euler_xyz(q_gyro_sync)
+
+        q_complementary = simple_kalman_filter(gyro_sync, q0, t_sync, dynamics, df_dx, df_du,
+                             rpy_acc_sync, 0.000001, 1000000,  K_quat=10.0)
+        rpy_complementary = quat_to_euler_xyz(q_complementary)
+
+        ## ---------------------------- P1 -----------------------------------
+        acc_data_normalized, gyro_data_filtered = scale_measurements_normalized(imu_data, imu_params)
+
+        t_sync = _choose_target_time(imu_ts[0, :].ravel(), vicon_ts[0, :].ravel(), prefer="denser")
+
+        # IMU (acc & gyro) are linear-interpolated per axis
+        acc_sync  = interp_linear_timeseries(imu_ts[0, :],  acc_data_normalized,  t_sync)   
+        gyro_sync = interp_linear_timeseries(imu_ts[0, :],  gyro_data_filtered, t_sync)   
+
+        q0 = quaternion_vicon_sync[:, 0]
+        q_madgwick = madwick_filter(gyro_sync, q0, t_sync, dynamics, acc_sync, flow, K_quat=10.0, renorm=True)
+        rpy_madgwick = quat_to_euler_xyz(q_madgwick)
+        return rpy_acc_sync, rpy_gyro_quat, rpy_complementary, rpy_madgwick, rpy_vicon_sync, t_sync
+    else:
+        # Scaled IMU Data
+        acc_data_filtered, gyro_data_filtered = scale_measurements(imu_data, imu_params)
+        
+        t_sync = imu_ts[0, :]
+
+        # IMU (acc & gyro) are linear-interpolated per axis
+        acc_sync  = acc_data_filtered
+        gyro_sync = gyro_data_filtered
+
+        # Angles from acc
+        rpy_acc_sync = angles_from_acc(acc_sync)
+
+        # Dystem dynamics and A matrix
+        dynamics, df_dx, df_du, flow = quatdot_function()
+
+        # Integral gyro using quaternion dot
+        q0 = np.array([1.0, 0.0, 0.0, 0.0])
+        q_gyro_sync = integrate_gyro_quaternion(gyro_sync, q0, t_sync, dynamics)
+        rpy_gyro_quat = quat_to_euler_xyz(q_gyro_sync)
+
+        q_complementary = simple_kalman_filter(gyro_sync, q0, t_sync, dynamics, df_dx, df_du,
+                             rpy_acc_sync, 0.000001, 1000000,  K_quat=10.0)
+        rpy_complementary = quat_to_euler_xyz(q_complementary)
+
+        ## ---------------------------- P1 -----------------------------------
+        acc_data_normalized, gyro_data_filtered = scale_measurements_normalized(imu_data, imu_params)
+
+        q0 = q0
+        q_madgwick = madwick_filter(gyro_sync, q0, t_sync, dynamics, acc_sync, flow, K_quat=10.0, renorm=True)
+        rpy_madgwick = quat_to_euler_xyz(q_madgwick)
+        return rpy_acc_sync, rpy_gyro_quat, rpy_complementary, rpy_madgwick, t_sync
+
 
 def main():
 
     # Parser
+    # Parser
     parser = argparse.ArgumentParser()
-    parser.add_argument("--imu_dir", default="../Data/Train/IMU/", help="Directory containing IMU files")
-    parser.add_argument("--vicon_dir", default="../Data/Train/Vicon/", help="Directory containing Vicon files")
+    parser.add_argument("--data_root", default="../Data", help="Root folder containing Train/Test splits")
+    parser.add_argument("--split", choices=["Train", "Test"], default="Train",
+                        help="Dataset split to use (Train or Test)")
     parser.add_argument("--imu_params", default="../IMUParams.mat", help="Path to IMU parameters file")
-
-    # New argument for experiment number
+    
+    # You can still override directories explicitly if you want
+    parser.add_argument("--imu_dir", default=None, help="(Optional) Override IMU directory")
+    parser.add_argument("--vicon_dir", default=None, help="(Optional) Override Vicon directory")
+    
+    # Experiment number
     parser.add_argument("--exp_num", type=int, choices=range(1, 7), default=5,
-                    help="Experiment number (1–6).")
-
-
+                        help="Experiment number (1–6).")
+    
     args = parser.parse_args()
+    
+    # Resolve directories: use overrides if provided, otherwise build from root/split
+    imu_dir = Path(args.imu_dir) if args.imu_dir else Path(args.data_root) / args.split / "IMU"
+    vicon_dir = Path(args.vicon_dir) if args.vicon_dir else Path(args.data_root) / args.split / "Vicon"
+    
     imu_file = f"imuRaw{args.exp_num}"
     vicon_file = f"viconRot{args.exp_num}"
     
     # Full paths
-    imu_path = Path(args.imu_dir) / f"{imu_file}.mat"
-    vicon_path = Path(args.vicon_dir) / f"{vicon_file}.mat"
+    imu_path    = imu_dir / f"{imu_file}.mat"
+    vicon_path  = vicon_dir / f"{vicon_file}.mat"
     params_path = Path(args.imu_params)
 
-    print(imu_path)
-
-    # Load data
-    imu = io.loadmat(imu_path)
-    vicon = io.loadmat(vicon_path)
+    
+    # --- Load data ---
+    imu = io.loadmat(imu_path)  # IMU must exist
     params = io.loadmat(params_path)
     
-    # Get IMU data
+    # Vicon is optional: only load if file actually exists
+    vicon = loadmat_optional(vicon_path)
+    
+    # --- Extract matrices ---
     imu_data = imu["vals"]
-    imu_ts = imu["ts"]
-    imu_ts = imu_ts
-    
-    # Get Vicon Data
-    vicon_data = vicon["rots"]
-    vicon_ts = vicon["ts"]
-    vicon_ts = vicon_ts
-    
-    # Parameters of the system bias and scale
+    imu_ts   = imu["ts"]
+
+    # IMU params
     imu_params = params["IMUParams"]
 
-    # Scaled IMU Data
-    acc_data_filtered, gyro_data_filtered = scale_measurements(imu_data, imu_params)
-
-    # Check the common time grid 
-    t_sync = _choose_target_time(imu_ts[0, :].ravel(), vicon_ts[0, :].ravel(), prefer="denser")
-
-    # IMU (acc & gyro) are linear-interpolated per axis
-    acc_sync  = interp_linear_timeseries(imu_ts[0, :],  acc_data_filtered,  t_sync)   
-    gyro_sync = interp_linear_timeseries(imu_ts[0, :],  gyro_data_filtered, t_sync)   
-
-    # Plot the signals accelerometers and gyroscope
-    #plot_acc(t_sync, acc_sync)
-    #plot_gyro(t_sync, gyro_sync)
-
-    # Interpolation of the rotation matrices 
-    R_sync = slerp_rotmats(vicon_ts[0, :], vicon_data, t_sync)
-
-    # Compute euler angles from vicon
-    quaternion_vicon_sync = quat_from_matrix(R_sync)
-    rpy_vicon_sync = quat_to_euler_xyz(quaternion_vicon_sync)
-
-    # Angles from acc
-    rpy_acc_sync = angles_from_acc(acc_sync)
-
-    # Dystem dynamics and A matrix
-    dynamics, df_dx, df_du, flow = quatdot_function()
-
-    # Integral gyro using quaternion dot
-    q0 = quaternion_vicon_sync[:, 0]
-    q_gyro_sync = integrate_gyro_quaternion(gyro_sync, q0, t_sync, dynamics)
-    rpy_gyro_quat = quat_to_euler_xyz(q_gyro_sync)
-
-    q_complementary = simple_kalman_filter(gyro_sync, q0, t_sync, dynamics, df_dx, df_du,
-                         rpy_acc_sync, 0.000001, 1000000,  K_quat=10.0)
-    rpy_complementary = quat_to_euler_xyz(q_complementary)
-
+    print(imu_path)
+    print(params_path)
+    print(vicon_path)
     
-    ## ---------------------------- P1 -----------------------------------
-    acc_data_normalized, gyro_data_filtered = scale_measurements_normalized(imu_data, imu_params)
+    # Vicon (optional)
+    if vicon is not None and "rots" in vicon and "ts" in vicon:
+        vicon_data = vicon["rots"]
+        vicon_ts   = vicon["ts"]
+        flag = True
+    else:
+        vicon_data = None
+        vicon_ts   = None
+        flag = False
+    if flag:
+    # returns: acc, gyro, complementary, madgwick, vicon, t
+        rpy_acc_sync, rpy_gyro_quat, rpy_complementary, rpy_madgwick, rpy_vicon_sync, t_sync = filters_estimation(imu_data, imu_params, imu_ts, vicon_data, vicon_ts, flag)
+        plot_all_methods_new(t_sync, rpy_acc_sync,                  # acc
+            time_rot=t_sync, rpy_rot=rpy_vicon_sync,           # vicon (present)
+            time_gyro=t_sync, rpy_gyro=rpy_gyro_quat,          # gyro
+            time_complement=t_sync, rpy_complement=rpy_complementary,  # complementary
+            time_madgwick=t_sync, rpy_madgwick=rpy_madgwick,   # madgwick
+            name=f"Results{args.exp_num}")
+    else:
+        # returns: acc, gyro, complementary, madgwick, t
+        rpy_acc_sync, rpy_gyro_quat, rpy_complementary, rpy_madgwick, t_sync = filters_estimation(imu_data, imu_params, imu_ts, vicon_data, vicon_ts, flag)
 
-    t_sync = _choose_target_time(imu_ts[0, :].ravel(), vicon_ts[0, :].ravel(), prefer="denser")
-
-    # IMU (acc & gyro) are linear-interpolated per axis
-    acc_sync  = interp_linear_timeseries(imu_ts[0, :],  acc_data_normalized,  t_sync)   
-    gyro_sync = interp_linear_timeseries(imu_ts[0, :],  gyro_data_filtered, t_sync)   
-
-    # Plot the signals accelerometers and gyroscope
-    plot_acc(t_sync, acc_sync)
-    plot_gyro(t_sync, gyro_sync)
-
-    q0 = quaternion_vicon_sync[:, 0]
-    q_madgwick = madwick_filter(gyro_sync, q0, t_sync, dynamics, acc_sync, flow, K_quat=10.0, renorm=True)
-
-    plot_quaternions(t_sync, quaternion_vicon_sync, "vicon")
-    plot_quaternions(t_sync, q_madgwick, "madgwick")
-    rpy_madgwick = quat_to_euler_xyz(q_madgwick)
-
-    plot_all_methods_new(t_sync, rpy_acc_sync, t_sync, rpy_vicon_sync, t_sync,
-                     rpy_gyro_quat, t_sync, rpy_complementary, t_sync,
-                         rpy_madgwick, f"Results{args.exp_num}")
+        plot_all_methods_new(t_sync, rpy_acc_sync,                  # acc
+        time_rot=None, rpy_rot=None,           # no vicon
+        time_gyro=t_sync, rpy_gyro=rpy_gyro_quat,
+        time_complement=t_sync, rpy_complement=rpy_complementary,
+        time_madgwick=t_sync, rpy_madgwick=rpy_madgwick,
+        name=f"Results{args.exp_num}")
     
     # Video
     #make_orientation_video(t_sync, rpy_vicon_sync, rpy_acc_sync, rpy_gyro_quat,

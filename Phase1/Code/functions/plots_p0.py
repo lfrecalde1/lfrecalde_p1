@@ -144,12 +144,13 @@ def plot_all_methods(time_acc, rpy_acc,
         plt.close(fig)
 
 def plot_all_methods_new(time_acc, rpy_acc,
-                     time_rot, rpy_rot,
-                     time_gyro, rpy_gyro,
-                     time_complement, rpy_complement,
-                     time_madgwick, rpy_madgwick,
-                     name="rpy_axis"):
+                         time_rot=None, rpy_rot=None,
+                         time_gyro=None, rpy_gyro=None,
+                         time_complement=None, rpy_complement=None,
+                         time_madgwick=None, rpy_madgwick=None,
+                         name="rpy_axis"):
     import matplotlib.pyplot as plt
+    import numpy as np
 
     with plt.style.context(["science", "no-latex"]):
         labels = ["roll", "pitch", "yaw"]
@@ -169,13 +170,18 @@ def plot_all_methods_new(time_acc, rpy_acc,
             "madgwick":      (0, (3, 1, 1, 1)),  # dash-dot-dot
         }
 
-        methods = [
-            (time_acc,        rpy_acc,        "acc"),
-            (time_rot,        rpy_rot,        "vicon"),
-            (time_gyro,       rpy_gyro,       "gyro"),
-            (time_complement, rpy_complement, "complementary"),
-            (time_madgwick,   rpy_madgwick,   "madgwick"),
-        ]
+        # Always include accelerometer
+        methods = [(time_acc, rpy_acc, "acc")]
+
+        # Conditionally add the others
+        if time_rot is not None and rpy_rot is not None and len(time_rot) > 0 and rpy_rot.size > 0:
+            methods.append((time_rot, rpy_rot, "vicon"))
+        if time_gyro is not None and rpy_gyro is not None and len(time_gyro) > 0 and rpy_gyro.size > 0:
+            methods.append((time_gyro, rpy_gyro, "gyro"))
+        if time_complement is not None and rpy_complement is not None and len(time_complement) > 0 and rpy_complement.size > 0:
+            methods.append((time_complement, rpy_complement, "complementary"))
+        if time_madgwick is not None and rpy_madgwick is not None and len(time_madgwick) > 0 and rpy_madgwick.size > 0:
+            methods.append((time_madgwick, rpy_madgwick, "madgwick"))
 
         fig, axes = plt.subplots(1, 3, figsize=(12, 3), sharex=False, sharey=False)
 
@@ -205,7 +211,7 @@ def plot_all_methods_new(time_acc, rpy_acc,
         # Single shared legend above subplots
         if handles_for_legend:
             fig.legend(handles_for_legend, labels_for_legend,
-                       loc="upper center", ncol=5, frameon=False)
+                       loc="upper center", ncol=len(methods), frameon=False)
 
         fig.tight_layout(rect=(0, 0, 1, 0.90))  # leave room for legend on top
 
