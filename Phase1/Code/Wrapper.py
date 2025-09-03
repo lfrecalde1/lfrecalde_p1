@@ -559,10 +559,6 @@ def main():
 
     # IMU params
     imu_params = params["IMUParams"]
-
-    print(imu_path)
-    print(params_path)
-    print(vicon_path)
     
     # Vicon (optional)
     if vicon is not None and "rots" in vicon and "ts" in vicon:
